@@ -3,6 +3,7 @@ import os, json, re, sys
 repo = os.environ.get("REPO_PATH", ".")
 context_dir = os.environ.get("CONTEXT_DIR", "/tmp/issue2plan_context")
 
+# Read all context files
 context_path = os.path.join(context_dir, "issue_context.json")
 if os.path.exists(context_path):
     with open(context_path) as f:
@@ -10,11 +11,18 @@ if os.path.exists(context_path):
     keywords = ctx.get("keywords", [])
     issue_title = ctx.get("issue_title", "")
     issue_body = ctx.get("issue_body", "")
+    problem = ctx.get("problem", "")
+    expected_behavior = ctx.get("expected_behavior", "")
+    domain_concepts = ctx.get("domain_concepts", [])
+    technical_keywords = ctx.get("technical_keywords", [])
 else:
     issue_title = os.environ.get("ISSUE_TITLE", "")
     issue_body = os.environ.get("ISSUE_BODY", "")
-    keywords_str = os.environ.get("KEYWORDS", "")
-    keywords = [k.strip().lower() for k in keywords_str.split(",") if k.strip()]
+    keywords = []
+    problem = issue_title
+    expected_behavior = ""
+    domain_concepts = []
+    technical_keywords = []
 
 relevant_files_path = os.path.join(context_dir, "relevant_files.json")
 if os.path.exists(relevant_files_path):
@@ -22,8 +30,75 @@ if os.path.exists(relevant_files_path):
         rf = json.load(f)
     relevant_files = [item["path"] for item in rf.get("files", [])]
 else:
-    files_str = os.environ.get("RELEVANT_FILES", "")
-    relevant_files = [f.strip() for f in files_str.split(",") if f.strip()]
+    relevant_files = []
+
+call_paths_path = os.path.join(context_dir, "call_paths.json")
+if os.path.exists(call_paths_path):
+    with open(call_paths_path) as f:
+        cp = json.load(f)
+    call_paths = cp.get("call_paths", [])
+else:
+    call_paths = []
+
+patterns_path = os.path.join(context_dir, "patterns.json")
+if os.path.exists(patterns_path):
+    with open(patterns_path) as f:
+        pt = json.load(f)
+    patterns = pt.get("relevant_patterns", [])
+else:
+    patterns = []
+
+# Build search terms from issue analysis
+search_terms = list(dict.fromkeys(keywords + technical_keywords))[:20]
+
+# Generate specific required behavior based on issue and symbol
+def generate_required_behavior(symbol, filepath, content, keywords, problem, expected_behavior):
+    """Generate a specific required behavior description based on the symbol and issue context."""
+    lines = content.split('\n')
+    sym_line = 0
+    sym_body = ""
+    for i, line in enumerate(lines):
+        if symbol in line and re.search(rf'(?:function|class|def|func|fn|const|let|var)\s+{re.escape(symbol)}', line):
+            sym_line = i
+            # Get function body
+            body_lines = []
+            for j in range(i, min(len(lines), i + 30)):
+                body_lines.append(lines[j])
+                if j > i and re.match(r'^(?:export\s+)?(?:async\s+)?(?:function|class|def|func|fn)\s+\w+', lines[j]):
+                    break
+            sym_body = '\n'.join(body_lines)
+            break
+
+    # Check what the function currently does
+    does_error_handling = 'throw' in sym_body or 'catch' in sym_body or 'Error' in sym_body
+    does_return = 'return' in sym_body
+    is_async = 'async' in sym_body
+    does_fetch = 'fetch' in sym_body or 'request' in sym_body
+    does_send = 'send' in sym_body or 'write' in sym_body
+
+    # Generate behavior based on context
+    behaviors = []
+    for kw in keywords:
+        if len(kw) <= 3:
+            continue
+        if kw in symbol.lower():
+            behaviors.append(f"implement {kw} logic")
+        elif kw in sym_body.lower():
+            behaviors.append(f"handle '{kw}' in the function body")
+        elif does_fetch and kw in ['retry', 'backoff', 'timeout']:
+            behaviors.append(f"add {kw} support to the fetch operation")
+        elif does_send and kw in ['buffer', 'arraybuffer', 'binary']:
+            behaviors.append(f"handle {kw} data in the send operation")
+        elif does_error_handling and kw in ['error', 'exception', 'fail']:
+            behaviors.append(f"improve {kw} handling")
+
+    if not behaviors:
+        if problem:
+            behaviors.append(f"address: {problem[:80]}")
+        else:
+            behaviors.append(f"modify to support: {issue_title[:60]}")
+
+    return "; ".join(behaviors[:3])
 
 changes = []
 
@@ -34,6 +109,9 @@ for filepath in relevant_files[:20]:
     except:
         continue
 
+    lines = content.split('\n')
+
+    # Extract symbols
     symbols = []
     for m in re.finditer(r'(?:export\s+(?:default\s+)?(?:class|function|const|let|var|interface|type|enum)\s+(\w+))', content):
         symbols.append(m.group(1))
@@ -43,120 +121,201 @@ for filepath in relevant_files[:20]:
             symbols.append(name)
 
     for symbol in symbols[:10]:
-        symbol_lower = symbol.lower()
         relevance = 0
         reasons = []
+        evidence = []
+
+        # Check symbol name against keywords
+        symbol_lower = symbol.lower()
         for kw in keywords:
-            if kw in symbol_lower:
+            if len(kw) > 2 and kw in symbol_lower:
                 relevance += 10
                 reasons.append(f"symbol name contains '{kw}'")
 
-        try:
-            symbol_pattern = re.compile(rf'(?:class|function|def|func|fn)\s+{re.escape(symbol)}\s*[\(:]?\s*\n([\s\S]{{0,2000}}?)(?=\nclass|\ndef|\nfunc|\nfn|\nexport|\nmodule|\Z)', re.MULTILINE)
-            sm = symbol_pattern.search(content)
-            if sm:
-                body = sm.group(1)
-                for kw in keywords:
-                    if kw in body.lower():
-                        relevance += 3
-                        reasons.append(f"body references '{kw}'")
-        except:
-            pass
+        # Check symbol body against keywords
+        sym_body = ""
+        sym_line = 0
+        for i, line in enumerate(lines):
+            if symbol in line and re.search(rf'(?:function|class|def|func|fn|const|let|var)\s+{re.escape(symbol)}', line):
+                sym_line = i
+                for j in range(i, min(len(lines), i + 30)):
+                    sym_body += lines[j] + '\n'
+                    if j > i and re.match(r'^(?:export\s+)?(?:async\s+)?(?:function|class|def|func|fn)\s+\w+', lines[j]):
+                        break
+                break
 
-        try:
-            symbol_lines = content.split('\n')
-            for i, line in enumerate(symbol_lines):
-                if symbol in line:
-                    context_start = max(0, i - 3)
-                    context_end = min(len(symbol_lines), i + 15)
-                    nearby = ' '.join(symbol_lines[context_start:context_end])
-                    for kw in keywords:
-                        if kw in nearby.lower() and kw not in symbol_lower:
-                            relevance += 5
-                            reasons.append(f"nearby code references '{kw}'")
-                    if 'TODO' in nearby or 'FIXME' in nearby or 'HACK' in nearby:
-                        for kw in keywords:
-                            if kw in nearby.lower():
-                                relevance += 8
-                                reasons.append(f"TODO/FIXME mentions '{kw}'")
-                    break
-        except:
-            pass
+        for kw in keywords:
+            if len(kw) > 2 and kw in sym_body.lower():
+                relevance += 3
+                reasons.append(f"body references '{kw}'")
+
+        # Check nearby code (before/after function)
+        nearby_start = max(0, sym_line - 5)
+        nearby_end = min(len(lines), sym_line + 35)
+        nearby_text = '\n'.join(lines[nearby_start:nearby_end])
+        for kw in keywords:
+            if len(kw) > 2 and kw in nearby_text.lower() and kw not in symbol_lower:
+                relevance += 5
+                reasons.append(f"nearby code references '{kw}'")
+                # Capture evidence line
+                for i in range(nearby_start, nearby_end):
+                    if kw in lines[i].lower():
+                        evidence.append({"line": i + 1, "text": lines[i].strip()[:120], "keyword": kw})
+                        break
+
+        # Check TODO/FIXME
+        for i in range(nearby_start, nearby_end):
+            if i < len(lines) and ('TODO' in lines[i] or 'FIXME' in lines[i]):
+                for kw in keywords:
+                    if len(kw) > 2 and kw in lines[i].lower():
+                        relevance += 8
+                        reasons.append(f"TODO/FIXME mentions '{kw}'")
+                        evidence.append({"line": i + 1, "text": lines[i].strip()[:120], "keyword": kw})
+                        break
+
+        # Check call paths for dependency info
+        dependencies = []
+        for cp_item in call_paths:
+            if cp_item.get("entry_symbol") == symbol and cp_item.get("file") == filepath:
+                for callee in cp_item.get("called_symbols", []):
+                    dependencies.append({
+                        "symbol": callee["symbol"],
+                        "file": callee["file"],
+                        "relationship": callee["relationship"]
+                    })
+                break
+
+        # Also find who depends on this symbol
+        depended_by = []
+        for cp_item in call_paths:
+            if cp_item.get("file") != filepath:
+                for callee in cp_item.get("called_symbols", []):
+                    if callee.get("symbol") == symbol:
+                        depended_by.append({
+                            "symbol": cp_item["entry_symbol"],
+                            "file": cp_item["file"]
+                        })
 
         if relevance > 0:
-            line_num = 0
-            for i, line in enumerate(content.split('\n'), 1):
-                if symbol in line:
-                    line_num = i
-                    break
+            # Determine confidence based on evidence quality
+            has_file_evidence = any(e["keyword"] in sym_body.lower() for e in evidence)
+            has_nearby_evidence = any(e["keyword"] not in symbol_lower for e in evidence)
+            has_todo = any('TODO' in e.get("text", "") or 'FIXME' in e.get("text", "") for e in evidence)
+
+            if relevance >= 15 and (has_todo or (has_file_evidence and has_nearby_evidence)):
+                confidence = "HIGH"
+            elif relevance >= 8 and has_file_evidence:
+                confidence = "MEDIUM"
+            else:
+                confidence = "LOW"
 
             current_behavior = "Component exists in current codebase"
-            try:
-                symbol_lines = content.split('\n')
-                for i, line in enumerate(symbol_lines):
-                    if symbol in line and (i + 5) < len(symbol_lines):
-                        body_text = ' '.join(symbol_lines[i:i+10])
-                        if 'error' in body_text.lower() or 'throw' in body_text.lower() or 'catch' in body_text.lower():
-                            current_behavior = "Handles errors in current implementation"
-                        if 'return' in body_text.lower():
-                            current_behavior = "Returns result from current implementation"
-                        if 'async' in body_text.lower() or 'await' in body_text.lower():
-                            current_behavior = "Async operation in current implementation"
-                        break
-            except:
-                pass
+            if 'throw' in sym_body or 'Error' in sym_body:
+                current_behavior = "Handles errors in current implementation"
+            if 'return' in sym_body:
+                current_behavior += " and returns results"
+            if 'async' in sym_body:
+                current_behavior = "Async operation in current implementation"
+            if 'fetch' in sym_body or 'request' in sym_body:
+                current_behavior = "Makes HTTP requests in current implementation"
+            if 'send' in sym_body:
+                current_behavior = "Sends data in current implementation"
+
+            required_behavior = generate_required_behavior(symbol, filepath, content, keywords, problem, expected_behavior)
 
             changes.append({
                 "file": filepath,
                 "symbol": symbol,
-                "line": line_num,
+                "line": sym_line + 1,
                 "current_behavior": current_behavior,
-                "required_behavior": f"Modify to support: {issue_title}",
+                "required_behavior": required_behavior,
                 "reason": "; ".join(reasons) if reasons else "Related to issue requirements",
-                "confidence": "HIGH" if relevance >= 10 else "MEDIUM"
+                "evidence": evidence[:5],
+                "dependencies": dependencies[:5],
+                "depended_by": depended_by[:5],
+                "confidence": confidence
             })
 
-if not changes:
-    for kw in keywords[:3]:
-        if len(kw) > 3:
-            changes.append({
-                "file": "(to be determined)",
-                "symbol": "(to be determined)",
-                "line": 0,
-                "current_behavior": "No directly matching component found",
-                "required_behavior": f"Implement {kw} functionality",
-                "reason": f"Issue requires '{kw}' but no matching code found",
-                "confidence": "LOW"
-            })
+# Sort by confidence
+confidence_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+changes.sort(key=lambda x: confidence_order.get(x["confidence"], 3))
 
-changes.sort(key=lambda x: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(x["confidence"], 3))
-
+# Generate implementation order based on dependencies
 implementation_order = []
 step = 1
+
+# First: changes with no dependents (leaf nodes)
 for change in changes:
-    if change["confidence"] == "HIGH":
+    if change["confidence"] == "HIGH" and not change.get("depended_by"):
         implementation_order.append({
             "step": step,
-            "description": f"Modify `{change['symbol']}` in `{change['file']}` (line {change['line']})",
+            "description": f"Modify `{change['symbol']}` in `{change['file']}` (line {change['line']}) — {change['required_behavior']}",
             "file": change["file"],
-            "symbol": change["symbol"]
+            "symbol": change["symbol"],
+            "type": "implementation"
         })
         step += 1
+
+# Then: HIGH confidence changes with dependents
 for change in changes:
-    if change["confidence"] == "MEDIUM" and change["file"] not in [o["file"] for o in implementation_order]:
+    if change["confidence"] == "HIGH" and change.get("depended_by"):
+        already_listed = any(o["file"] == change["file"] and o["symbol"] == change["symbol"] for o in implementation_order)
+        if not already_listed:
+            implementation_order.append({
+                "step": step,
+                "description": f"Modify `{change['symbol']}` in `{change['file']}` (line {change['line']}) — {change['required_behavior']}",
+                "file": change["file"],
+                "symbol": change["symbol"],
+                "type": "implementation"
+            })
+            step += 1
+
+# Then: MEDIUM confidence
+for change in changes:
+    if change["confidence"] == "MEDIUM":
+        already_listed = any(o["file"] == change["file"] and o["symbol"] == change["symbol"] for o in implementation_order)
+        if not already_listed:
+            implementation_order.append({
+                "step": step,
+                "description": f"Review and modify `{change['symbol']}` in `{change['file']}` — {change['required_behavior']}",
+                "file": change["file"],
+                "symbol": change["symbol"],
+                "type": "review"
+            })
+            step += 1
+
+# Add testing steps
+test_files_ctx = os.path.join(context_dir, "tests.json")
+if os.path.exists(test_files_ctx):
+    with open(test_files_ctx) as f:
+        tests = json.load(f)
+    recommended = tests.get("recommended_tests", [])
+    relevant_test = tests.get("relevant_test_files", [])
+    if relevant_test:
         implementation_order.append({
             "step": step,
-            "description": f"Review and modify `{change['symbol']}` in `{change['file']}`",
-            "file": change["file"],
-            "symbol": change["symbol"]
+            "description": f"Add regression tests in `{relevant_test[0]['file']}`",
+            "file": relevant_test[0]["file"],
+            "symbol": "N/A",
+            "type": "testing"
+        })
+        step += 1
+    elif recommended:
+        implementation_order.append({
+            "step": step,
+            "description": f"Create test file at `{recommended[0]['suggested_test_file']}`",
+            "file": recommended[0]["suggested_test_file"],
+            "symbol": "N/A",
+            "type": "testing"
         })
         step += 1
 
 implementation_order.append({
     "step": step,
-    "description": "Validate all changes and run tests",
+    "description": "Run the repository's existing test suite to verify no regressions",
     "file": "N/A",
-    "symbol": "N/A"
+    "symbol": "N/A",
+    "type": "validation"
 })
 
 result = {
