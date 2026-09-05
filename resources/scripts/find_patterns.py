@@ -47,7 +47,6 @@ for dc in domain_concepts:
         p = p.strip()
         if len(p) > 2:
             search_terms.append(p)
-# Add related terms based on domain concepts
 related_term_map = {
     'Binary Data': ['Buffer', 'Uint8Array', 'Blob', 'Stream', 'binary', 'typed array'],
     'Response Handling': ['res.send', 'res.json', 'res.write', 'res.end', 'response.send', 'response.body'],
@@ -62,86 +61,191 @@ for dc in domain_concepts:
         search_terms.extend(related_term_map[dc])
 search_terms = list(dict.fromkeys(search_terms))[:25]
 
-# Search for patterns
+# --- Helper: Detect context type of a line ---
+def detect_context_type(line, prev_lines):
+    """Detect whether a line is in a comment, import, function body, type annotation, etc."""
+    stripped = line.strip()
+
+    # Comment detection
+    if stripped.startswith('//') or stripped.startswith('#') or stripped.startswith('/*') or stripped.startswith('*'):
+        return "comment"
+    if stripped.startswith('<!--'):
+        return "comment"
+
+    # Import detection
+    if re.match(r'^(?:import|from|require)\s', stripped):
+        return "import"
+
+    # Type annotation detection
+    if re.match(r'^(?:export\s+)?(?:type|interface|enum)\s', stripped):
+        return "type_definition"
+
+    # Function/class definition
+    if re.match(r'^(?:export\s+)?(?:async\s+)?(?:function|class|def|func|fn)\s', stripped):
+        return "definition"
+
+    # Check if inside a function (heuristic: indented and previous line is a definition)
+    if prev_lines:
+        for prev in reversed(prev_lines):
+            prev_stripped = prev.strip()
+            if prev_stripped and not prev_stripped.startswith('//') and not prev_stripped.startswith('#'):
+                if re.match(r'(?:function|class|def|func|fn)\s', prev_stripped):
+                    return "function_body"
+                break
+
+    return "general_code"
+
+# --- Helper: Check if symbol is exported/reusable ---
+def check_reusability(filepath, symbol, content):
+    """Check if a symbol is exported, tested, or documented."""
+    reusability = []
+    if re.search(rf'export\s+(?:default\s+)?(?:class|function|const|let|var)\s+{re.escape(symbol)}', content):
+        reusability.append("exported")
+    if re.search(rf'export\s+\{{\s*{re.escape(symbol)}', content):
+        reusability.append("exported")
+    # Check if referenced in test files
+    skip_dirs_local = {'.git', 'node_modules', 'vendor', '__pycache__', 'dist', 'build'}
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in skip_dirs_local and not d.startswith('.')]
+        for f in files:
+            if re.match(r'.*\.(test|spec)\.(ts|tsx|js|jsx|py)$', f):
+                try:
+                    test_content = open(os.path.join(root, f), 'r', errors='ignore').read()
+                    if symbol in test_content:
+                        reusability.append("tested")
+                        return reusability  # early exit
+                except:
+                    pass
+    # Check for JSDoc/docstring
+    for m in re.finditer(rf'(?:/\*\*[\s\S]*?\*/\s*(?:export\s+)?(?:async\s+)?(?:function|class)\s+{re.escape(symbol)}|"""\s*(?:def|class)\s+{re.escape(symbol)})', content):
+        reusability.append("documented")
+        break
+    return reusability
+
+# --- Search for patterns with structure awareness ---
 relevant_patterns = []
 for term in search_terms:
     term_lower = term.lower()
-    patterns_found = []
+    locations_found = []
+
     for filepath in scan_files[:25]:
         full = os.path.join(repo, filepath)
         try:
             content = open(full, 'r', errors='ignore').read()
             lines = content.split('\n')
-            for i, line in enumerate(lines):
-                if term_lower in line.lower():
-                    snippet = line.strip()[:120]
-                    # Calculate similarity: how well does this pattern match the issue?
-                    similarity = 0
-                    how_it_applies = ""
-                    line_lower = line.lower()
-
-                    # Check if this line is related to the problem
-                    if problem:
-                        problem_words = [w for w in problem.lower().split() if len(w) > 3]
-                        for pw in problem_words:
-                            if pw in line_lower:
-                                similarity += 0.2
-                                how_it_applies = f"Pattern relates to problem: '{pw}' found in code"
-
-                    # Check if this line is related to expected behavior
-                    if expected_behavior:
-                        exp_words = [w for w in expected_behavior.lower().split() if len(w) > 3]
-                        for ew in exp_words:
-                            if ew in line_lower:
-                                similarity += 0.15
-                                how_it_applies = f"Pattern relates to expected behavior: '{ew}' found in code"
-
-                    # Check for TODO/FIXME indicating this area needs work
-                    if 'TODO' in line or 'FIXME' in line:
-                        similarity += 0.3
-                        how_it_applies = "Area is marked as needing implementation (TODO/FIXME)"
-
-                    # Check for existing error handling patterns
-                    if any(x in line_lower for x in ['try', 'catch', 'throw', 'error']):
-                        similarity += 0.1
-                        how_it_applies = how_it_applies or "Shows existing error handling pattern"
-
-                    # Check for similar function signatures
-                    if 'function' in line_lower or 'def ' in line_lower or 'class ' in line_lower:
-                        similarity += 0.1
-                        how_it_applies = how_it_applies or "Defines a similar component"
-
-                    similarity = min(1.0, round(similarity, 2))
-                    if similarity > 0:
-                        patterns_found.append({
-                            "file": filepath,
-                            "line": i + 1,
-                            "snippet": snippet,
-                            "similarity": similarity,
-                            "how_it_applies": how_it_applies,
-                            "confidence": min(1.0, similarity + 0.2)
-                        })
-                    elif len(patterns_found) < 2:
-                        patterns_found.append({
-                            "file": filepath,
-                            "line": i + 1,
-                            "snippet": snippet,
-                            "similarity": 0.1,
-                            "how_it_applies": f"Contains '{term}' reference",
-                            "confidence": 0.3
-                        })
-                    if len(patterns_found) >= 3:
-                        break
         except:
-            pass
-        if len(patterns_found) >= 3:
+            continue
+
+        prev_lines = []
+        for i, line in enumerate(lines):
+            line_lower = line.lower()
+            if term_lower in line_lower:
+                context_type = detect_context_type(line, prev_lines)
+                snippet = line.strip()[:120]
+
+                # Calculate similarity with structure awareness
+                similarity = 0
+                how_it_applies = ""
+
+                # Weight by context type
+                context_weight = {
+                    "definition": 1.0,
+                    "function_body": 0.9,
+                    "general_code": 0.7,
+                    "import": 0.5,
+                    "type_definition": 0.6,
+                    "comment": 0.2
+                }.get(context_type, 0.5)
+
+                # Check relationship to problem
+                problem_words = [w for w in problem.lower().split() if len(w) > 3]
+                exp_words = [w for w in expected_behavior.lower().split() if len(w) > 3]
+                nearby_text = '\n'.join(lines[max(0, i-3):min(len(lines), i+4)]).lower()
+
+                for pw in problem_words:
+                    if pw in nearby_text:
+                        similarity += 0.15
+                        how_it_applies = f"Related to problem: '{pw}' in nearby code"
+                for ew in exp_words:
+                    if ew in nearby_text:
+                        similarity += 0.1
+                        how_it_applies = how_it_applies or f"Related to expected behavior: '{ew}'"
+
+                # TODO/FIXME in nearby code
+                for j in range(max(0, i-2), min(len(lines), i+3)):
+                    if 'TODO' in lines[j] or 'FIXME' in lines[j]:
+                        if term_lower in lines[j].lower():
+                            similarity += 0.25
+                            how_it_applies = "Area marked as needing implementation (TODO/FIXME)"
+                            break
+
+                # Existing implementation (not just a comment)
+                if context_type in ("definition", "function_body"):
+                    similarity += 0.2
+                    if not how_it_applies:
+                        how_it_applies = f"Existing implementation in {context_type}"
+
+                # Apply context weight
+                similarity = similarity * context_weight
+                similarity = min(1.0, round(similarity, 2))
+
+                # Confidence based on evidence quality
+                confidence = 0.1  # minimum for any match
+                if context_type == "definition":
+                    confidence = 0.8
+                elif context_type == "function_body":
+                    confidence = 0.7
+                elif context_type == "general_code":
+                    confidence = 0.5
+                elif context_type == "import":
+                    confidence = 0.4
+                elif context_type == "comment":
+                    confidence = 0.2
+
+                if similarity > 0.3:
+                    confidence = min(1.0, confidence + similarity * 0.2)
+
+                # Check reusability
+                symbol_in_line = ""
+                m = re.search(r'(?:function|class|def|func|fn|const|let|var)\s+(\w+)', line)
+                if m:
+                    symbol_in_line = m.group(1)
+                reusability = []
+                if symbol_in_line:
+                    reusability = check_reusability(filepath, symbol_in_line, content)
+
+                if similarity > 0 or context_type == "definition":
+                    locations_found.append({
+                        "file": filepath,
+                        "line": i + 1,
+                        "snippet": snippet,
+                        "context_type": context_type,
+                        "similarity": similarity,
+                        "how_it_applies": how_it_applies or f"Contains '{term}' reference",
+                        "reusability": reusability,
+                        "confidence": round(confidence, 2)
+                    })
+
+            prev_lines.append(line)
+            if len(prev_lines) > 5:
+                prev_lines.pop(0)
+
+            if len(locations_found) >= 3:
+                break
+        if len(locations_found) >= 3:
             break
 
-    if patterns_found:
+    # Sort by confidence * similarity
+    locations_found.sort(key=lambda x: x["confidence"] * x["similarity"], reverse=True)
+
+    if locations_found:
+        best = locations_found[0]
         relevant_patterns.append({
             "existing_pattern": term,
-            "locations": patterns_found[:3],
-            "evidence": patterns_found[0]["snippet"] if patterns_found else ""
+            "locations": locations_found[:3],
+            "evidence": best["snippet"],
+            "how_it_applies": best["how_it_applies"],
+            "confidence": best["confidence"]
         })
 
 # Detect codebase conventions

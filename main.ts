@@ -6,7 +6,7 @@
  * description: "Turn any GitHub issue into an evidence-backed, file-level implementation plan by investigating the repository"
  * metadata:
  *   rote_version: 0.79.0
- *   version: 0.3.0
+ *   version: 0.4.0
  *   status: draft
  *   kind: atomic
  *   flow_type: sequential
@@ -115,7 +115,7 @@ const testsData = parseJson(extractText(step5)) || {};
 const changesData = parseJson(extractText(step6)) || {};
 const validationData = parseJson(extractText(step7)) || {};
 
-// Extract all data
+// Issue data
 const problem: string = issueData.problem || ctx.params.issue_title;
 const expectedBehavior: string = issueData.expected_behavior || "";
 const domainConcepts: string[] = issueData.domain_concepts || [];
@@ -127,47 +127,55 @@ const acceptanceCriteria: string[] = issueData.acceptance_criteria || [];
 const constraints: string[] = issueData.constraints || [];
 const unknowns: string[] = issueData.unknowns || [];
 
+// Repo data
 const languages: Record<string, number> = repoData.language || {};
 const frameworks: string[] = repoData.framework || [];
 const packageManagers: string[] = repoData.package_manager || [];
 const sourceDirectories: string[] = repoData.source_directories || [];
 const testDirectories: string[] = repoData.test_directories || [];
 const entryPoints: string[] = repoData.entry_points || [];
-const configFiles: Record<string, string> = repoData.config_files || {};
 const buildSystem: string[] = repoData.build_system || [];
 const repoStructure: string[] = repoData.repository_structure || [];
 const testFramework: string = repoData.test_framework || "unknown";
 
+// Files data
 const relevantFiles: Array<{path: string; reasons: string[]; matched_concept: string; relevant_lines: any[]; confidence: number}> = filesData.files || [];
 
+// Dependencies data
 const callPaths: Array<{entry_symbol: string; file: string; line: number; called_symbols: any[]; callers: any[]; files: string[]; relationship: string; error_handling: string[]; evidence: any[]}> = depsData.call_paths || [];
 
-const relevantPatterns: Array<{existing_pattern: string; locations: any[]; evidence: string}> = patternsData.relevant_patterns || [];
+// Patterns data
+const relevantPatterns: Array<{existing_pattern: string; locations: any[]; evidence: string; how_it_applies: string; confidence: number}> = patternsData.relevant_patterns || [];
 const conventions: any[] = patternsData.conventions || [];
 
-const relevantTestFiles: Array<{file: string; relevance: number; reasons: string[]}> = testsData.relevant_test_files || [];
-const testFiles: string[] = testsData.test_files || [];
+// Tests data
+const existingTestFiles: string[] = testsData.existing_test_files || [];
+const relevantExistingTests: Array<{file: string; relevance: number; reasons: string[]; confidence: string}> = testsData.relevant_existing_tests || [];
+const proposedModifications: Array<{file: string; what_to_add: string; confidence: string; reason: string}> = testsData.proposed_modifications || [];
+const proposedNewTests: Array<{source_file: string; proposed_test_file: string; test_directory_exists: boolean; what_to_test: string; test_scenarios: string[]; confidence: string; status: string}> = testsData.proposed_new_tests || [];
 const missingCoverage: string[] = testsData.missing_coverage || [];
-const recommendedTests: any[] = testsData.recommended_tests || [];
 
+// Changes data
 const changes: any[] = changesData.changes || [];
 const implOrder: any[] = changesData.implementation_order || [];
 
-const filesVerified: any[] = validationData.files_verified || [];
-const filesMissing: any[] = validationData.files_missing || [];
-const symbolsVerified: any[] = validationData.symbols_verified || [];
-const symbolsMissing: any[] = validationData.symbols_missing || [];
-const sourceClaims: any[] = validationData.source_claims || [];
-const changeRelevance: any[] = validationData.change_relevance || [];
-const testLocationValidation: any[] = validationData.test_location_validation || [];
-const assumptions: string[] = validationData.assumptions || [];
+// Validation data
+const perChangeValidation: any[] = validationData.per_change_validation || [];
+const testValidation: any[] = validationData.test_validation || [];
 const validationScore: number = validationData.validation_score || 0;
-const fileSymbolScore: number = validationData.file_symbol_score || 0;
-const claimsScore: number = validationData.claims_score || 0;
-const relevanceScore: number = validationData.relevance_score || 0;
+const verifiedCount: number = validationData.verified_count || 0;
+const contradictedCount: number = validationData.contradicted_count || 0;
+const inferredCount: number = validationData.inferred_count || 0;
+const unknownCount: number = validationData.unknown_count || 0;
+const totalChecks: number = validationData.total_checks || 0;
+const repositoryFactScore: number = validationData.repository_fact_score || 0;
+const behavioralClaimScore: number = validationData.behavioral_claim_score || 0;
+const relationshipScore: number = validationData.relationship_score || 0;
+const testScore: number = validationData.test_score || 0;
+const confidenceModel: any = validationData.confidence_model || {};
 
-// Compute dynamic confidence
-const confidence = validationScore >= 80 ? "HIGH" : validationScore >= 50 ? "MEDIUM" : "LOW";
+// Compute overall confidence from granular model
+const overallConfidence = validationScore >= 80 ? "HIGH" : validationScore >= 50 ? "MEDIUM" : "LOW";
 
 // --- OUTPUT ---
 out.human("# Implementation Plan");
@@ -199,7 +207,7 @@ if (likelyComponents.length > 0) {
   out.human("");
 }
 
-// 2. Acceptance Criteria (behavioral)
+// 2. Acceptance Criteria
 out.human("## 2. Acceptance Criteria");
 out.human("");
 if (acceptanceCriteria.length > 0) {
@@ -225,27 +233,12 @@ out.human("");
 if (Object.keys(languages).length > 0) {
   out.human("**Languages:** " + Object.entries(languages).map(([l, c]) => `${l} (${c} files)`).join(", "));
 }
-if (frameworks.length > 0) {
-  out.human("**Frameworks:** " + frameworks.join(", "));
-}
-if (packageManagers.length > 0) {
-  out.human("**Package Managers:** " + packageManagers.join(", "));
-}
-if (buildSystem.length > 0) {
-  out.human("**Build System:** " + buildSystem.join(", "));
-}
-if (sourceDirectories.length > 0) {
-  out.human("**Source Directories:** " + sourceDirectories.join(", "));
-}
-if (testDirectories.length > 0) {
-  out.human("**Test Directories:** " + testDirectories.join(", "));
-}
-if (entryPoints.length > 0) {
-  out.human("**Entry Points:** " + entryPoints.join(", "));
-}
-if (Object.keys(configFiles).length > 0) {
-  out.human("**Config Files:** " + Object.entries(configFiles).map(([k, v]) => `${k} (${v})`).join(", "));
-}
+if (frameworks.length > 0) out.human("**Frameworks:** " + frameworks.join(", "));
+if (packageManagers.length > 0) out.human("**Package Managers:** " + packageManagers.join(", "));
+if (buildSystem.length > 0) out.human("**Build System:** " + buildSystem.join(", "));
+if (sourceDirectories.length > 0) out.human("**Source Directories:** " + sourceDirectories.join(", "));
+if (testDirectories.length > 0) out.human("**Test Directories:** " + testDirectories.join(", "));
+if (entryPoints.length > 0) out.human("**Entry Points:** " + entryPoints.join(", "));
 out.human("");
 if (repoStructure.length > 0) {
   out.human("**Repository Structure:**");
@@ -262,22 +255,13 @@ out.human("| File | Matched Concept | Confidence | Relevance |");
 out.human("|------|-----------------|------------|-----------|");
 if (relevantFiles.length > 0) {
   relevantFiles.slice(0, 15).forEach((f: any) => {
-    const confidence = typeof f.confidence === 'number' ? `${Math.round(f.confidence * 100)}%` : "N/A";
-    out.human(`| \`${f.path}\` | ${f.matched_concept || "general"} | ${confidence} | ${(f.reasons || []).slice(0, 2).join("; ")} |`);
+    const conf = typeof f.confidence === 'number' ? `${Math.round(f.confidence * 100)}%` : "N/A";
+    out.human(`| \`${f.path}\` | ${f.matched_concept || "general"} | ${conf} | ${(f.reasons || []).slice(0, 2).join("; ")} |`);
   });
 } else {
   out.human("| (none found) | - | - | No relevant files identified |");
 }
 out.human("");
-if (relevantFiles.length > 0 && relevantFiles[0].relevant_lines?.length > 0) {
-  out.human("**Key Code Locations:**");
-  relevantFiles.slice(0, 3).forEach((f: any) => {
-    if (f.relevant_lines && f.relevant_lines.length > 0) {
-      out.human(`- \`${f.path}:${f.relevant_lines[0].line}\` — ${f.relevant_lines[0].text}`);
-    }
-  });
-  out.human("");
-}
 
 // 5. Execution / Dependency Path
 out.human("## 5. Execution / Dependency Path");
@@ -294,13 +278,10 @@ if (callPaths.length > 0) {
     if (cp.error_handling && cp.error_handling.length > 0) {
       out.human(`  - Error handling: ${cp.error_handling.join(", ")}`);
     }
-    if (cp.evidence && cp.evidence.length > 0) {
-      out.human(`  - Evidence: \`${cp.file}:${cp.evidence[0].line}\` — ${cp.evidence[0].text}`);
-    }
     out.human("");
   });
 } else {
-  out.human("No dependency paths traced. Manual analysis recommended.");
+  out.human("No dependency paths traced.");
   out.human("");
 }
 
@@ -309,29 +290,24 @@ out.human("## 6. Existing Patterns");
 out.human("");
 if (relevantPatterns.length > 0) {
   relevantPatterns.slice(0, 8).forEach((p: any) => {
-    out.human(`**${p.existing_pattern}:**`);
+    out.human(`**${p.existing_pattern}** (confidence: ${Math.round((p.confidence || 0) * 100)}%)`);
     if (p.locations) {
       p.locations.slice(0, 2).forEach((loc: any) => {
         out.human(`- \`${loc.file}:${loc.line}\`: ${loc.snippet}`);
-        if (loc.how_it_applies) {
-          out.human(`  - How it applies: ${loc.how_it_applies}`);
-        }
-        if (loc.similarity) {
-          out.human(`  - Similarity: ${Math.round(loc.similarity * 100)}%`);
-        }
+        if (loc.context_type) out.human(`  - Context: ${loc.context_type}`);
+        if (loc.how_it_applies) out.human(`  - How it applies: ${loc.how_it_applies}`);
+        if (loc.reusability && loc.reusability.length > 0) out.human(`  - Reusability: ${loc.reusability.join(", ")}`);
       });
     }
     out.human("");
   });
 } else {
-  out.human("No issue-relevant patterns found in the codebase.");
+  out.human("No issue-relevant patterns found.");
   out.human("");
 }
 if (conventions.length > 0) {
   out.human("**Code Conventions:**");
-  conventions.slice(0, 5).forEach((c: any) => {
-    out.human(`- ${c.pattern} (${c.file}, ${c.count} occurrences)`);
-  });
+  conventions.slice(0, 5).forEach((c: any) => out.human(`- ${c.pattern} (${c.file}, ${c.count} occurrences)`));
   out.human("");
 }
 
@@ -340,29 +316,43 @@ out.human("## 7. Implementation Changes");
 out.human("");
 if (changes.length > 0) {
   changes.slice(0, 10).forEach((ch: any, i: number) => {
-    out.human(`### Step ${i + 1} — ${ch.confidence} Confidence`);
+    const confLevel = ch.confidence?.level || "UNKNOWN";
+    const confReason = ch.confidence?.reason || "";
+    out.human(`### Step ${i + 1} — ${confLevel} Confidence`);
     out.human("");
     out.human(`**File:** \`${ch.file}:${ch.line}\``);
     out.human(`**Symbol:** \`${ch.symbol}\``);
     out.human(`**Current Behavior:** ${ch.current_behavior}`);
     out.human(`**Required Behavior:** ${ch.required_behavior}`);
-    out.human(`**Reason:** ${ch.reason}`);
+    if (ch.why_this_location && ch.why_this_location.length > 0) {
+      out.human("**Why This Location:**");
+      ch.why_this_location.forEach((reason: string) => out.human(`- ${reason}`));
+    }
+    if (ch.reuse && ch.reuse.length > 0) {
+      out.human(`**Reuse:** ${ch.reuse.join(", ")}`);
+    }
+    if (ch.affected_callers && ch.affected_callers.length > 0) {
+      out.human("**Affected Callers:**");
+      ch.affected_callers.forEach((c: any) => out.human(`- \`${c.symbol}\` in \`${c.file}\` (breakage risk: ${c.breakage_risk})`));
+    }
     if (ch.evidence && ch.evidence.length > 0) {
       out.human("**Evidence:**");
-      ch.evidence.slice(0, 3).forEach((e: any) => {
-        out.human(`- \`${ch.file}:${e.line}\` — ${e.text}`);
-      });
+      ch.evidence.slice(0, 3).forEach((e: any) => out.human(`- \`${ch.file}:${e.line}\` — ${e.text}`));
     }
-    if (ch.dependencies && ch.dependencies.length > 0) {
-      out.human(`**Dependencies:** ${ch.dependencies.map((d: any) => `\`${d.symbol}\` (${d.relationship})`).join(", ")}`);
+    if (ch.test_guidance && ch.test_guidance.length > 0) {
+      out.human("**Test Guidance:**");
+      ch.test_guidance.forEach((t: string) => out.human(`- ${t}`));
     }
-    if (ch.depended_by && ch.depended_by.length > 0) {
-      out.human(`**Depended By:** ${ch.depended_by.map((d: any) => `\`${d.symbol}\` in \`${d.file}\``).join(", ")}`);
+    if (ch.risks && ch.risks.length > 0) {
+      out.human(`**Risks:** ${ch.risks.join("; ")}`);
+    }
+    if (confReason) {
+      out.human(`**Confidence Reason:** ${confReason}`);
     }
     out.human("");
   });
 } else {
-  out.human("No specific changes determined. Manual analysis required.");
+  out.human("No specific changes determined.");
   out.human("");
 }
 
@@ -371,65 +361,72 @@ out.human("## 8. Testing Strategy");
 out.human("");
 out.human(`**Test Framework:** ${testFramework}`);
 out.human("");
-if (relevantTestFiles.length > 0) {
-  out.human("**Relevant Test Files:**");
-  relevantTestFiles.forEach((t: any) => {
+
+if (relevantExistingTests.length > 0) {
+  out.human("**Existing Relevant Tests:**");
+  relevantExistingTests.forEach((t: any) => {
     out.human(`- \`${t.file}\` (relevance: ${t.relevance}) — ${t.reasons.join(", ")}`);
   });
   out.human("");
 }
-if (testFiles.length > 0) {
-  out.human("**All Test Files:**");
-  testFiles.slice(0, 10).forEach((t: string) => out.human(`- \`${t}\``));
+
+if (proposedModifications.length > 0) {
+  out.human("**Proposed Test Modifications:**");
+  proposedModifications.forEach((m: any) => {
+    out.human(`- \`${m.file}\` — ${m.what_to_add}`);
+    out.human(`  - Reason: ${m.reason}`);
+  });
   out.human("");
 }
+
+if (proposedNewTests.length > 0) {
+  out.human("**Proposed New Tests:**");
+  proposedNewTests.forEach((t: any) => {
+    out.human(`- \`${t.proposed_test_file}\` (status: ${t.status}, confidence: ${t.confidence})`);
+    out.human(`  - What to test: ${t.what_to_test}`);
+    if (t.test_scenarios && t.test_scenarios.length > 0) {
+      out.human(`  - Scenarios:`);
+      t.test_scenarios.forEach((s: string) => out.human(`    - ${s}`));
+    }
+    if (!t.test_directory_exists) {
+      out.human(`  - Note: test directory does not exist yet`);
+    }
+  });
+  out.human("");
+}
+
 if (missingCoverage.length > 0) {
   out.human("**Missing Coverage:**");
   missingCoverage.forEach((m: string) => out.human(`- No tests for '${m}'`));
   out.human("");
 }
-if (recommendedTests.length > 0) {
-  out.human("**Recommended Tests:**");
-  recommendedTests.forEach((r: any) => {
-    out.human(`- \`${r.suggested_test_file}\` — ${r.what_to_test}`);
-    out.human(`  - Reason: ${r.reason}`);
-  });
+
+if (existingTestFiles.length > 0 && relevantExistingTests.length === 0 && proposedModifications.length === 0 && proposedNewTests.length === 0) {
+  out.human(`**All Test Files (${existingTestFiles.length}):**`);
+  existingTestFiles.slice(0, 10).forEach((t: string) => out.human(`- \`${t}\``));
   out.human("");
 }
 
 // 9. Edge Cases
 out.human("## 9. Edge Cases");
 out.human("");
-if (unknowns.length > 0) {
-  unknowns.forEach((u: string) => out.human(`- ${u}`));
-}
-if (constraints.length > 0) {
-  constraints.forEach((c: string) => out.human(`- ${c}`));
-}
-if (unknowns.length === 0 && constraints.length === 0) {
-  out.human("- No specific edge cases identified from issue analysis");
-}
+if (unknowns.length > 0) unknowns.forEach((u: string) => out.human(`- ${u}`));
+if (constraints.length > 0) constraints.forEach((c: string) => out.human(`- ${c}`));
+if (unknowns.length === 0 && constraints.length === 0) out.human("- No specific edge cases identified");
 out.human("");
 
 // 10. Risks
 out.human("## 10. Risks");
 out.human("");
-if (filesMissing.length > 0) {
-  out.human("**Missing Files:**");
-  filesMissing.forEach((f: any) => out.human(`- \`${f.file}\` not found`));
-  out.human("");
-}
-if (symbolsMissing.length > 0) {
-  out.human("**Missing Symbols:**");
-  symbolsMissing.forEach((s: any) => out.human(`- \`${s.symbol}\` not found in \`${s.file}\``));
-  out.human("");
-}
-if (assumptions.length > 0) {
-  out.human("**Assumptions:**");
-  assumptions.forEach((a: string) => out.human(`- ${a}`));
-  out.human("");
-}
-if (filesMissing.length === 0 && symbolsMissing.length === 0 && assumptions.length === 0) {
+const allRisks: string[] = [];
+changes.slice(0, 5).forEach((ch: any) => {
+  if (ch.risks) ch.risks.forEach((r: string) => allRisks.push(`[${ch.symbol}] ${r}`));
+});
+if (contradictedCount > 0) allRisks.push(`${contradictedCount} claim(s) contradicted by source code`);
+if (unknownCount > 0) allRisks.push(`${unknownCount} check(s) could not be verified`);
+if (allRisks.length > 0) {
+  allRisks.forEach((r: string) => out.human(`- ${r}`));
+} else {
   out.human("No significant risks identified.");
 }
 out.human("");
@@ -439,8 +436,9 @@ out.human("## 11. Implementation Order");
 out.human("");
 if (implOrder.length > 0) {
   implOrder.forEach((o: any) => {
-    const typeEmoji = o.type === "testing" ? "[test]" : o.type === "validation" ? "[validate]" : o.type === "review" ? "[review]" : "[impl]";
-    out.human(`${o.step}. ${typeEmoji} ${o.description}`);
+    const typeLabel = o.type === "testing" ? "[test]" : o.type === "validation" ? "[validate]" : o.type === "review" ? "[review]" : "[impl]";
+    out.human(`${o.step}. ${typeLabel} ${o.description}`);
+    if (o.details) out.human(`   ${o.details}`);
   });
 } else {
   out.human("1. Analyze requirements");
@@ -454,16 +452,19 @@ out.human("");
 // 12. Evidence
 out.human("## 12. Evidence");
 out.human("");
-const allEvidence: any[] = [];
-filesVerified.slice(0, 10).forEach((f: any) => allEvidence.push({ type: "file", text: `\`${f.file}\` exists` }));
-symbolsVerified.slice(0, 10).forEach((s: any) => allEvidence.push({ type: "symbol", text: `\`${s.symbol}\` in \`${s.file}\` — ${s.status}` }));
-sourceClaims.filter((c: any) => c.supported).slice(0, 5).forEach((c: any) => allEvidence.push({ type: "claim", text: `\`${c.symbol}\`: ${c.observation}` }));
-if (allEvidence.length > 0) {
-  allEvidence.forEach((e: any) => out.human(`- [${e.type}] ${e.text}`));
-} else {
-  out.human("- Limited evidence available");
-}
+out.human(`- Verified: ${verifiedCount} check(s)`);
+out.human(`- Inferred: ${inferredCount} check(s)`);
+out.human(`- Contradicted: ${contradictedCount} check(s)`);
+out.human(`- Unknown: ${unknownCount} check(s)`);
 out.human("");
+if (perChangeValidation.length > 0) {
+  out.human("**Per-Change Validation:**");
+  perChangeValidation.slice(0, 5).forEach((cv: any) => {
+    const status = cv.overall_status || "unknown";
+    out.human(`- \`${cv.symbol}\` in \`${cv.file}\`: ${status} (${cv.verified_count}/${cv.total_checks} checks passed)`);
+  });
+  out.human("");
+}
 
 // 13. Validation Results
 out.human("## 13. Validation Results");
@@ -472,47 +473,47 @@ out.human(`**Overall Validation Score:** ${validationScore}%`);
 out.human("");
 out.human(`| Metric | Score |`);
 out.human(`|--------|-------|`);
-out.human(`| File/Symbol Verification | ${fileSymbolScore}% |`);
-out.human(`| Source Claims Verification | ${claimsScore}% |`);
-out.human(`| Change Relevance | ${relevanceScore}% |`);
-out.human("");
-out.human(`- Files verified: ${filesVerified.length}`);
-out.human(`- Files missing: ${filesMissing.length}`);
-out.human(`- Symbols verified: ${symbolsVerified.length}`);
-out.human(`- Symbols missing: ${symbolsMissing.length}`);
-out.human(`- Source claims verified: ${sourceClaims.filter((c: any) => c.supported).length}/${sourceClaims.length}`);
-out.human(`- Relevant changes: ${changeRelevance.filter((r: any) => r.relevant).length}/${changeRelevance.length}`);
-if (testLocationValidation.length > 0) {
-  out.human(`- Test locations valid: ${testLocationValidation.filter((t: any) => t.valid).length}/${testLocationValidation.length}`);
-}
-if (assumptions.length > 0) {
-  out.human(`- Assumptions: ${assumptions.length}`);
-}
+out.human(`| Repository Facts (files/symbols) | ${repositoryFactScore}% |`);
+out.human(`| Behavioral Claims | ${behavioralClaimScore}% |`);
+out.human(`| Relationships | ${relationshipScore}% |`);
+out.human(`| Test Recommendations | ${testScore}% |`);
 out.human("");
 
 // 14. Confidence
 out.human("## 14. Confidence");
 out.human("");
-out.human(`**${confidence}**`);
+out.human(`**Overall: ${overallConfidence}**`);
 out.human("");
-if (confidence === "HIGH") {
-  out.human("All referenced files and symbols were verified. Source claims are supported by code evidence. Repository evidence strongly supports the recommendations.");
-} else if (confidence === "MEDIUM") {
-  out.human("Most evidence exists but some uncertainty remains. Some source claims could not be fully verified. Manual review recommended for complex areas.");
+if (confidenceModel && Object.keys(confidenceModel).length > 0) {
+  out.human("**Granular Confidence:**");
+  Object.entries(confidenceModel).forEach(([key, val]: [string, any]) => {
+    const label = key.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase());
+    out.human(`- **${label}:** ${val.level} — ${val.reason}`);
+  });
+  out.human("");
+}
+if (overallConfidence === "HIGH") {
+  out.human("All referenced files and symbols verified. Source claims supported by code evidence. Repository evidence strongly supports the recommendations.");
+} else if (overallConfidence === "MEDIUM") {
+  out.human("Most evidence verified. Some behavioral claims could not be fully confirmed. Manual review recommended for complex areas.");
 } else {
-  out.human("Limited evidence available. Significant manual analysis required before implementation. Some files or symbols could not be verified.");
+  out.human("Limited evidence available. Significant manual analysis required before implementation.");
 }
 
-out.summary(`Issue2Plan: ${confidence} confidence plan for "${ctx.params.issue_title}" (${validationScore}% validation)`);
+out.summary(`Issue2Plan: ${overallConfidence} confidence plan for "${ctx.params.issue_title}" (${validationScore}% validation)`);
 out.result({
   run_id: ctx.run.run_id,
   issue_title: ctx.params.issue_title,
   repo_path: ctx.params.repo_path,
-  confidence,
+  confidence: overallConfidence,
   validation_score: validationScore,
-  file_symbol_score: fileSymbolScore,
-  claims_score: claimsScore,
-  relevance_score: relevanceScore,
+  repository_fact_score: repositoryFactScore,
+  behavioral_claim_score: behavioralClaimScore,
+  relationship_score: relationshipScore,
+  test_score: testScore,
+  verified_count: verifiedCount,
+  contradicted_count: contradictedCount,
+  inferred_count: inferredCount,
   problem,
   keywords,
   requirements,
@@ -520,9 +521,7 @@ out.result({
   frameworks,
   relevant_files: relevantFiles.length,
   changes: changes.length,
-  test_files: testFiles.length,
-  files_verified: filesVerified.length,
-  files_missing: filesMissing.length,
-  symbols_verified: symbolsVerified.length,
-  symbols_missing: symbolsMissing.length,
+  existing_test_files: existingTestFiles.length,
+  proposed_modifications: proposedModifications.length,
+  proposed_new_tests: proposedNewTests.length,
 });
