@@ -146,17 +146,37 @@ def verify_relationship(caller_file, caller_symbol, callee_symbol, repo):
     except:
         return {"verified": False, "reason": "File not readable", "status": "unknown"}
 
-    # Find caller's body
-    for m in re.finditer(rf'(?:function|class|def|func|fn)\s+{re.escape(caller_symbol)}\s*[\(:]?\s*\n([\s\S]{{0,2000}}?)(?=\nclass|\ndef|\nfunc|\nfn|\nexport|\nmodule|\Z)', content, re.MULTILINE):
-        body = m.group(1)
-        if f'{callee_symbol}(' in body or f'.{callee_symbol}(' in body:
-            return {"verified": True, "reason": f"{caller_symbol} calls {callee_symbol} in its body", "status": "verified"}
-        break
-
-    # Check imports
+    # Find caller's function definition and extract body
+    # Try multiple patterns to handle different code styles
+    patterns = [
+        # Pattern 1: function with body on next lines
+        rf'(?:export\s+)?(?:async\s+)?function\s+{re.escape(caller_symbol)}\s*\([^)]*\)\s*\{{([\s\S]{{0,3000}}?)\}}\s*(?:\n|$)',
+        # Pattern 2: const arrow function
+        rf'(?:export\s+)?const\s+{re.escape(caller_symbol)}\s*=\s*(?:async\s+)?\([^)]*\)\s*=>\s*\{{([\s\S]{{0,3000}}?)\}}\s*(?:;|\n|$)',
+        # Pattern 3: const arrow function with body
+        rf'(?:export\s+)?const\s+{re.escape(caller_symbol)}\s*=\s*(?:async\s+)?\([^)]*\)\s*=>\s*([\s\S]{{0,1000}}?)(?=\n(?:export|const|function|class|\Z))',
+        # Pattern 4: Simple function search
+        rf'(?:function|class|def|func|fn)\s+{re.escape(caller_symbol)}\s*[\(:]?\s*\n([\s\S]{{0,2000}}?)(?=\nclass|\ndef|\nfunc|\nfn|\nexport|\nmodule|\Z)',
+    ]
+    
+    for pattern in patterns:
+        for m in re.finditer(pattern, content, re.MULTILINE):
+            body = m.group(1)
+            # Check if callee is called in the body
+            if f'{callee_symbol}(' in body or f'.{callee_symbol}(' in body:
+                return {"verified": True, "reason": f"{caller_symbol} calls {callee_symbol} in its body", "status": "verified"}
+            break
+    
+    # Also check if the callee is imported and used anywhere in the file
     if re.search(rf'import\s+.*{re.escape(callee_symbol)}', content):
-        return {"verified": True, "reason": f"{caller_file} imports {callee_symbol}", "status": "verified"}
-
+        # Check if callee is used in the file (not just imported)
+        if re.search(rf'\b{re.escape(callee_symbol)}\s*\(', content):
+            return {"verified": True, "reason": f"{caller_file} imports and uses {callee_symbol}", "status": "verified"}
+    
+    # Check for method calls like obj.callee()
+    if re.search(rf'\.\s*{re.escape(callee_symbol)}\s*\(', content):
+        return {"verified": True, "reason": f"{caller_file} calls {callee_symbol} as a method", "status": "verified"}
+    
     return {"verified": False, "reason": f"Could not verify {caller_symbol} calls {callee_symbol}", "status": "inferred"}
 
 # --- Per-change validation ---

@@ -61,7 +61,7 @@ else:
     proposed_modifications = []
 
 # --- Helper: Generate specific required_behavior ---
-def generate_required_behavior(symbol, filepath, content, keywords, problem, expected_behavior, call_paths, patterns):
+def generate_required_behavior(symbol, filepath, content, keywords, problem, expected_behavior, call_paths, patterns, acceptance_criteria):
     """Generate a specific required behavior referencing code patterns to follow."""
     lines = content.split('\n')
     sym_body = ""
@@ -81,6 +81,7 @@ def generate_required_behavior(symbol, filepath, content, keywords, problem, exp
     is_async = 'async' in sym_body
     does_fetch = any(x in sym_body for x in ['fetch', 'request', 'http'])
     does_send = any(x in sym_body for x in ['send', 'write', 'end'])
+    has_todo = 'TODO' in sym_body or 'FIXME' in sym_body
 
     # Find reusable patterns from the codebase
     reusable = []
@@ -93,36 +94,139 @@ def generate_required_behavior(symbol, filepath, content, keywords, problem, exp
                     "line": loc["line"]
                 })
 
-    # Build specific behavior description
+    # Build SPECIFIC behavior description based on issue context
     behaviors = []
-    for kw in keywords:
-        if len(kw) <= 3:
-            continue
-        if kw in symbol.lower():
-            if does_fetch and kw in ['retry', 'backoff', 'timeout']:
-                behaviors.append(f"add {kw} handling around the fetch operation")
-            elif does_send and kw in ['buffer', 'arraybuffer', 'binary']:
-                behaviors.append(f"handle {kw} data in the send operation")
-            elif does_error_handling and kw in ['error', 'exception', 'fail']:
-                behaviors.append(f"improve {kw} handling")
+    
+    # First priority: Use acceptance criteria if available
+    if acceptance_criteria:
+        for ac in acceptance_criteria[:2]:
+            # Extract the core action from acceptance criteria
+            ac_lower = ac.lower()
+            # Handle various patterns: "should", "must", "can", "will"
+            for keyword in ['should', 'must', 'can', 'will']:
+                if keyword in ac_lower:
+                    action = ac_lower.split(keyword, 1)[1].strip()
+                    # Remove common prefixes
+                    for prefix in ['be able to', 'be capable of', '']:
+                        if action.startswith(prefix):
+                            action = action[len(prefix):].strip()
+                    if len(action) > 10:
+                        # Clean up the action
+                        action = action.rstrip('.')
+                        # Remove trailing incomplete words (from truncation)
+                        words = action.split()
+                        if words and len(words[-1]) < 3:
+                            words.pop()
+                        action = ' '.join(words)
+                        if not action.startswith(('add', 'remove', 'update', 'implement', 'fix', 'handle', 'support')):
+                            action = f"implement {action}"
+                        behaviors.append(f"Requirement: {action[:120]}")
+                        break
+            if behaviors:
+                break
+    
+    # Second priority: Use expected behavior
+    if not behaviors and expected_behavior:
+        eb_lower = expected_behavior.lower()
+        for keyword in ['should', 'must', 'can', 'will']:
+            if keyword in eb_lower:
+                action = eb_lower.split(keyword, 1)[1].strip()
+                for prefix in ['be able to', 'be capable of', '']:
+                    if action.startswith(prefix):
+                        action = action[len(prefix):].strip()
+                if len(action) > 10:
+                    action = action.rstrip('.')
+                    if not action.startswith(('add', 'remove', 'update', 'implement', 'fix', 'handle', 'support')):
+                        action = f"implement {action}"
+                    behaviors.append(f"Expected: {action[:120]}")
+                    break
+        if not behaviors and len(expected_behavior) > 10:
+            behaviors.append(f"Implement: {expected_behavior[:100]}")
+    
+    # Third priority: Use problem description
+    if not behaviors and problem:
+        # Extract what's broken from the problem
+        problem_lower = problem.lower()
+        if 'not working' in problem_lower or 'fails' in problem_lower or 'crashes' in problem_lower:
+            # Identify the specific failure mode
+            if 'null' in problem_lower or 'undefined' in problem_lower:
+                behaviors.append(f"Add null/undefined check before accessing properties")
+            elif 'empty' in problem_lower:
+                behaviors.append(f"Handle empty response/input gracefully")
+            elif 'timeout' in problem_lower:
+                behaviors.append(f"Add timeout handling with fallback behavior")
+            elif 'error' in problem_lower:
+                behaviors.append(f"Add proper error handling to prevent crashes")
             else:
-                behaviors.append(f"implement {kw} logic")
-        elif kw in sym_body.lower():
-            if does_fetch and kw in ['retry', 'backoff', 'timeout']:
-                behaviors.append(f"add {kw} support using existing fetch pattern")
+                # Try to extract the specific issue
+                if 'when' in problem_lower:
+                    trigger = problem_lower.split('when', 1)[1].strip()
+                    if len(trigger) > 10:
+                        behaviors.append(f"Fix: handle {trigger[:80]}")
+                    else:
+                        behaviors.append(f"Fix: {problem[:80]}")
+                else:
+                    behaviors.append(f"Fix: {problem[:80]}")
+        elif 'should' in problem_lower:
+            action = problem_lower.split('should', 1)[1].strip()
+            if len(action) > 10:
+                behaviors.append(f"Implement: {action[:100]}")
+        elif len(problem) > 10:
+            # Extract the core issue
+            if 'returns' in problem_lower:
+                behaviors.append(f"Fix return value: {problem[:80]}")
+            elif 'missing' in problem_lower or 'lacks' in problem_lower:
+                behaviors.append(f"Add missing functionality: {problem[:80]}")
             else:
-                behaviors.append(f"handle '{kw}' in the function body")
-
+                behaviors.append(f"Address: {problem[:80]}")
+    
+    # Fourth priority: Analyze symbol context for specific guidance
     if not behaviors:
-        if problem:
-            behaviors.append(f"address: {problem[:80]}")
-        else:
-            behaviors.append(f"modify to support: {issue_title[:60]}")
+        if has_todo:
+            # Find the TODO comment to understand what's expected
+            for line in lines[sym_line:sym_line+10]:
+                if 'TODO' in line or 'FIXME' in line:
+                    todo_text = line.split('TODO', 1)[-1].split('FIXME', 1)[-1].strip().lstrip(':').strip()
+                    if len(todo_text) > 5:
+                        behaviors.append(f"Complete TODO: {todo_text[:80]}")
+                    break
+        
+        if not behaviors:
+            # Use symbol context to generate specific guidance
+            if 'refund' in symbol.lower() or 'refund' in ' '.join(keywords):
+                if does_fetch:
+                    behaviors.append("Implement refund logic using Stripe SDK refund API")
+                else:
+                    behaviors.append("Implement refund processing logic")
+            elif 'payment' in symbol.lower() or 'charge' in symbol.lower():
+                if does_fetch:
+                    behaviors.append("Add payment processing with error handling and retry")
+                else:
+                    behaviors.append("Implement payment processing logic")
+            elif 'cache' in symbol.lower() or 'redis' in symbol.lower():
+                if does_error_handling:
+                    behaviors.append("Add graceful fallback when cache is unavailable")
+                else:
+                    behaviors.append("Add cache error handling with fallback behavior")
+            elif 'retry' in symbol.lower() or 'backoff' in symbol.lower():
+                behaviors.append("Implement retry logic with exponential backoff")
+            elif does_fetch:
+                behaviors.append("Add error handling and retry logic for HTTP requests")
+            elif does_error_handling:
+                behaviors.append("Improve error handling with specific exception types")
+            else:
+                behaviors.append(f"Modify to handle: {problem[:60] if problem else 'issue requirements'}")
 
     # Add reuse guidance
     if reusable:
-        reuse_names = [r["name"] for r in reusable[:3]]
-        behaviors.append(f"reuse existing utilities: {', '.join(reuse_names)}")
+        reuse_names = [r["name"] for r in reusable[:2]]
+        behaviors.append(f"Reuse: {', '.join(reuse_names)}")
+
+    # Add specific technical guidance based on function analysis
+    if is_async and does_fetch:
+        behaviors.append("Ensure async/await pattern with proper error propagation")
+    elif does_error_handling:
+        behaviors.append("Follow existing try/catch pattern for consistency")
 
     return "; ".join(behaviors[:3])
 
@@ -295,7 +399,7 @@ for filepath in relevant_files[:20]:
                 current_behavior = "Sends data in current implementation"
 
             # Required behavior
-            required_behavior = generate_required_behavior(symbol, filepath, content, keywords, problem, expected_behavior, call_paths, patterns)
+            required_behavior = generate_required_behavior(symbol, filepath, content, keywords, problem, expected_behavior, call_paths, patterns, acceptance_criteria)
 
             # Why this location
             why_this_location = generate_why_this_location(symbol, filepath, content, call_paths, keywords)
@@ -370,6 +474,8 @@ for filepath in relevant_files[:20]:
                 "required_behavior": required_behavior,
                 "why_this_location": why_this_location,
                 "reuse": reuse[:3],
+                "dependencies": dependencies[:5],
+                "depended_by": depended_by[:5],
                 "affected_callers": affected_callers[:5],
                 "evidence": evidence[:5],
                 "test_guidance": test_guidance,
@@ -385,6 +491,9 @@ for filepath in relevant_files[:20]:
 # Sort by confidence
 confidence_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 changes.sort(key=lambda x: confidence_order.get(x["confidence"]["level"], 3))
+
+# Filter out LOW confidence changes - they're usually noise
+changes = [c for c in changes if c["confidence"]["level"] in ("HIGH", "MEDIUM")][:10]
 
 # Generate implementation order based on dependencies
 implementation_order = []

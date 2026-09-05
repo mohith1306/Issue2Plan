@@ -147,7 +147,34 @@ for filepath in all_files:
         })
 
 file_scores.sort(key=lambda x: -x["score"])
-relevant = [f for f in file_scores if f["score"] >= 5][:30]
+
+# Filter out low-relevance files
+# Require at least one strong signal: filename match, TODO marker, or multiple content matches
+def is_relevant(file_data):
+    score = file_data["score"]
+    reasons = file_data["reasons"]
+    
+    # Strong signals that indicate high relevance
+    has_filename_match = any("filename matches" in r for r in reasons)
+    has_todo_marker = any("TODO/FIXME" in r for r in reasons)
+    has_multiple_content_matches = sum(1 for r in reasons if "content matches" in r) >= 2
+    has_source_dir = any("source directory" in r for r in reasons)
+    
+    # Must have at least one strong signal OR high score
+    if has_filename_match or has_todo_marker or has_multiple_content_matches:
+        return True
+    
+    # High score without strong signals might still be relevant
+    if score >= 15:
+        return True
+    
+    # Files in source directories with decent score
+    if has_source_dir and score >= 10:
+        return True
+    
+    return False
+
+relevant = [f for f in file_scores if is_relevant(f)][:20]
 
 result = {
     "files": [

@@ -331,6 +331,14 @@ if (changes.length > 0) {
     if (ch.reuse && ch.reuse.length > 0) {
       out.human(`**Reuse:** ${ch.reuse.join(", ")}`);
     }
+    if (ch.dependencies && ch.dependencies.length > 0) {
+      out.human("**Calls:**");
+      ch.dependencies.forEach((d: any) => out.human(`- \`${d.symbol}\` in \`${d.file}\` (${d.relationship})`));
+    }
+    if (ch.depended_by && ch.depended_by.length > 0) {
+      out.human("**Called By:**");
+      ch.depended_by.forEach((d: any) => out.human(`- \`${d.symbol}\` in \`${d.file}\``));
+    }
     if (ch.affected_callers && ch.affected_callers.length > 0) {
       out.human("**Affected Callers:**");
       ch.affected_callers.forEach((c: any) => out.human(`- \`${c.symbol}\` in \`${c.file}\` (breakage risk: ${c.breakage_risk})`));
